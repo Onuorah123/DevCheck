@@ -1,98 +1,99 @@
+
 import express from "express";
-import Groq from "groq-sdk";
+import cors from "cors";
 import "dotenv/config";
-import {randomUUID} from "node:crypto";
+import Groq from "groq-sdk";
 import { Paystack } from "@paystack/paystack-sdk";
-console.log(
-    "Paystack key loaded:",
-    Boolean(process.env.PAYSTACK_SECRET_KEY)
-);
-
-
+import { randomUUID } from "node:crypto";
 
 const app = express();
 
- app.use(express.json());
-const PORT = process.env.PORT || 3000;
-
-const groq = new Groq({
-     apiKey:process.env.GROQ_API_KEY,
-});
-const conversations = new Map()
+app.use(cors());
 app.use(express.json());
 
-app.get("/",async(req,res) =>{
-    return res.status(200).json({
-        success:true,
-        message:"Welcome to Dev check",
-        status:"running",
+const groq = new Groq({
+    apiKey: process.env.GROQ_API_KEY,
+});
+
+const paystack = new Paystack(
+    process.env.PAYSTACK_SECRET_KEY
+);
+
+// Temporary conversation storage
+const conversations = new Map();
+
+app.get("/", (req, res) => {
+    res.status(200).json({
+        success: true,
+        message: "Welcome to DevCheck",
+        status: "running",
     });
 });
 
-
-app.get("/api/health",async(req,res) =>{
-    return res.status(200).json({
-        success:true,
-        message:"Dev check server is running",
-        timestamp:new Date().toISOString(),
-    })
+app.get("/api/health", (req, res) => {
+    res.status(200).json({
+        success: true,
+        message: "DevCheck server is running",
+        timestamp: new Date().toISOString(),
+    });
 });
 
-app.get("/api/check-groq",async(req,res)=>{
-    try{
+app.get("/api/check-groq", async (req, res) => {
+    try {
         const response = await groq.models.list();
-         return res.json({
-            success:true,
-            message:'Groq authentication worked',
-            modelsfound: response.data.length
-         })
-    }catch(error){
-        console.log("Groq authentication check:",error.message);
+
+        return res.status(200).json({
+            success: true,
+            message: "Groq authentication worked",
+            modelsFound: response.data.length,
+        });
+    } catch (error) {
+        console.error("Groq authentication error:", error.message);
 
         return res.status(500).json({
-            success:false,
-            message:"Groq authentication failed"
+            success: false,
+            message: "Groq authentication failed",
         });
     }
 });
 
+app.post("/api/chat", async (req, res) => {
+    const { message, conversationId } = req.body ?? {};
 
-
-app.post("/api/chat",async(req,res)=>{
-    const {message,conversationId} = req.body ?? {};
-     
-    if(typeof message !== "string"|| message.trim()===""){
+    if (typeof message !== "string" || message.trim() === "") {
         return res.status(400).json({
-        success:false,
-        message:" Please provide a valid messsage"
-});
+            success: false,
+            message: "Please provide a valid message",
+        });
     }
 
-    let id = conversationId;
-    if(id && typeof id !== "string"){
+    if (
+        conversationId !== undefined &&
+        (typeof conversationId !== "string" || conversationId.trim() === "")
+    ) {
         return res.status(400).json({
-            success:false,
-            message:"Conversation Id must be required"
-        })
-    };
-    if(!id) {
-        id= randomUUID();
+            success: false,
+            message: "Invalid conversation ID",
+        });
     }
-    const systemMesssage = {
-         role: "system",
+
+    const id = conversationId || randomUUID();
+
+    const systemMessage = {
+        role: "system",
         content: `You are DevCheck AI, a friendly and professional coding assistant.
-
 Explain programming concepts in simple English.
 Help users debug errors step by step.
 Be patient and encouraging.
 Use practical code examples when helpful.`,
+    };
 
+    if (!conversations.has(id)) {
+        conversations.set(id, [systemMessage]);
     }
-    if(!conversations.has(id)){
-        conversations.set(id,[systemMesssage]);
-    }
+
     const history = conversations.get(id);
-     history.push({
+    history.push({
         role: "user",
         content: message.trim(),
     });
@@ -118,7 +119,6 @@ Use practical code examples when helpful.`,
             reply,
         });
     } catch (error) {
-        // Remove the user message if the AI request fails.
         history.pop();
 
         console.error("Groq API error:", error.message);
@@ -129,46 +129,59 @@ Use practical code examples when helpful.`,
         });
     }
 });
- const paystack = new Paystack(
-     process.env.PAYSTACK_SECRET_KEY
- );
- 
- 
- app.post("/payment" ,async(req,res)=>{
-     try{
-         const {email,amount} = req.body;
-         if(!email || !amount){
-             return res.status(400).json({
-                 success:false,
-                 message:"Please provide a valid email address and amount"
-             })
-         }
-         const response = await paystack.transaction.initialize({
-             email:email,
-             amount:amount*100
-         });
-         if(!response.status){
-             return res.status(400).json({
-                 success:false,
-                 error:error.message
-             })
-         }
-         res.status(200).json({
-             success:true,
-             authorization_url:response.data.authorization_url,
-             reference:response.data.reference
-         });
-     }catch(error){
-         console.log("Paystack SDK ERROR:",error)
-         return res.status(500).json({
-             success:false,
-             error:error.message
-         })
-     }
- });
 
+app.post("/payment", async (req, res) => {
+    try {
+        const { email, amount } = req.body ?? {};
 
+        if (
+            typeof email !== "string" ||
+            email.trim() === "" ||
+            typeof amount !== "number" ||
+            !Number.isFinite(amount) ||
+            amount <= 0
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "Provide a valid email and positive numeric amount",
+            });
+        }
 
-app.listen(PORT,() =>{
-    console.log(`Dev check server running at http://localhost:${PORT}`)
+        const response = await paystack.transaction.initialize({
+            email: email.trim(),
+            amount: Math.round(amount * 100),
+        });
+
+        if (!response.status || !response.data) {
+            return res.status(400).json({
+                success: false,
+                message: "Unable to initialize payment",
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            authorization_url: response.data.authorization_url,
+            reference: response.data.reference,
+        });
+    } catch (error) {
+        console.error("Paystack SDK error:", error.message);
+
+        return res.status(500).json({
+            success: false,
+            message: "Unable to initialize payment",
+        });
+    }
 });
+
+// Export the Express app for Vercel.
+export default app;
+
+// Start a local server when running directly with Node.js.
+if (process.env.NODE_ENV !== "production") {
+    const PORT = process.env.PORT || 3000;
+
+    app.listen(PORT, () => {
+        console.log(`DevCheck server running on port ${PORT}`);
+    });
+}
